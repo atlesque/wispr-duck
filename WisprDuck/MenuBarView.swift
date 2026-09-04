@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Bindable var settings: AppSettings
     @ObservedObject var duckController: DuckController
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -101,8 +102,10 @@ struct MenuBarView: View {
                     .foregroundStyle(.tertiary)
                     .underline()
                 Spacer()
-                Button("Permissions") {
-                    NSWorkspace.shared.open(privacySettingsURL)
+                Button("Setup & Permissions") {
+                    NSApp.setActivationPolicy(.regular)
+                    openWindow(id: "welcome")
+                    NSApp.activate(ignoringOtherApps: true)
                 }
                 .footerButtonStyle()
                 Button("Quit") {
