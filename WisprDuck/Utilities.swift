@@ -41,6 +41,37 @@ func pidForProcessObject(_ objectID: AudioObjectID) -> pid_t? {
     return pid
 }
 
+/// Get the bundle ID Core Audio associates with a process object.
+/// This is available as soon as the process is registered with the HAL and is
+/// more reliable for short-lived/native helper processes than NSRunningApplication.
+func bundleIDForProcessObject(_ objectID: AudioObjectID) -> String? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyBundleID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var bundleID: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+
+    let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &bundleID)
+    guard status == noErr, let bundleID else { return nil }
+    return bundleID.takeRetainedValue() as String
+}
+
+/// Return whether a Core Audio process currently has an active output stream.
+func isProcessRunningOutput(_ objectID: AudioObjectID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyIsRunningOutput,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var isRunning: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+
+    let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &isRunning)
+    return status == noErr && isRunning != 0
+}
+
 /// Get the parent PID of a process via sysctl.
 func parentPID(of pid: pid_t) -> pid_t? {
     var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]

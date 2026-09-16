@@ -122,8 +122,16 @@ final class ProcessTapManager {
 
         return objectIDs.compactMap { objectID -> AudioProcess? in
             guard let pid = pidForProcessObject(objectID), pid != myPID else { return nil }
+            // The process object list also contains clients that have an audio
+            // object but are not currently producing output. Tapping those
+            // clients creates aggregate devices that remain uninitialized until
+            // they eventually emit audio, causing repeated delayed retries.
+            guard isProcessRunningOutput(objectID) else { return nil }
             let identity = appIdentityForProcessOrAncestor(pid)
-            let bundleID = identity?.bundleID
+            // Prefer the bundle ID reported by Core Audio. It is available at
+            // HAL registration time, before NSRunningApplication necessarily
+            // exposes a helper process identity.
+            let bundleID = bundleIDForProcessObject(objectID) ?? identity?.bundleID
             let name = identity?.name
 
             return AudioProcess(pid: pid, objectID: objectID, bundleID: bundleID, name: name ?? "PID \(pid)")
