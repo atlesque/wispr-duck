@@ -18,6 +18,9 @@ jobs:
       - name: Validate project files
         run: plutil -lint WisprDuck/Info.plist WisprDuck/WisprDuck.entitlements WisprDuck.xcodeproj/project.pbxproj
 
+      - name: Test audio responsiveness
+        run: ./scripts/test-audio.sh
+
       - name: Build native app
         run: |
           xcodebuild \

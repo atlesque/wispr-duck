@@ -7,6 +7,28 @@ import AppKit
 let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
 let microphonePrivacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
 
+/// Resolves helpers to their outermost app. Each audio worker owns its own
+/// cache so neither Launch Services lookups nor mutable state cross into UI work.
+final class AppBundleIDResolver {
+    private var cache: [String: String] = [:]
+
+    func rootAppBundleID(for bundleID: String) -> String {
+        if let cached = cache[bundleID] { return cached }
+        var components = bundleID.split(separator: ".").map(String.init)
+        while components.count > 2 {
+            let candidate = components.joined(separator: ".")
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: candidate),
+               url.pathComponents.filter({ $0.hasSuffix(".app") }).count <= 1 {
+                cache[bundleID] = candidate
+                return candidate
+            }
+            components.removeLast()
+        }
+        cache[bundleID] = bundleID
+        return bundleID
+    }
+}
+
 /// Human-readable Core Audio status for logs and user-facing diagnostics.
 func describeOSStatus(_ status: OSStatus) -> String {
     guard status != noErr else { return "noErr" }
@@ -39,6 +61,37 @@ func pidForProcessObject(_ objectID: AudioObjectID) -> pid_t? {
     let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &pid)
     guard status == noErr, pid > 0 else { return nil }
     return pid
+}
+
+/// Get the bundle ID Core Audio associates with a process object.
+/// This is available as soon as the process is registered with the HAL and is
+/// more reliable for short-lived/native helper processes than NSRunningApplication.
+func bundleIDForProcessObject(_ objectID: AudioObjectID) -> String? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyBundleID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var bundleID: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+
+    let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &bundleID)
+    guard status == noErr, let bundleID else { return nil }
+    return bundleID.takeRetainedValue() as String
+}
+
+/// Return whether a Core Audio process currently has an active output stream.
+func isProcessRunningOutput(_ objectID: AudioObjectID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyIsRunningOutput,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var isRunning: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+
+    let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &isRunning)
+    return status == noErr && isRunning != 0
 }
 
 /// Get the parent PID of a process via sysctl.

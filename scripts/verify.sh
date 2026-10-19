@@ -8,6 +8,9 @@ cd "$ROOT_DIR"
 echo "==> Validating project files"
 plutil -lint WisprDuck/Info.plist WisprDuck/WisprDuck.entitlements WisprDuck.xcodeproj/project.pbxproj
 
+echo "==> Testing audio responsiveness"
+./scripts/test-audio.sh
+
 echo "==> Building native app (Debug)"
 xcodebuild \
   -project WisprDuck.xcodeproj \

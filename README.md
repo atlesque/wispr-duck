@@ -45,6 +45,8 @@ No manual toggling. No keyboard shortcuts. Just works.
 
 > WisprDuck runs as a menu bar app — no Dock icon. Look for the duck foot in your menu bar.
 
+After setup, launching WisprDuck again keeps it running in the menu bar rather than opening a normal app window. Use the duck-foot menu and choose **Setup & Permissions** to reopen the setup window. Removing and reinstalling the app does not clear its saved onboarding state.
+
 ## How It Works
 
 WisprDuck uses [Core Audio process taps](https://developer.apple.com/documentation/coreaudio) (macOS 14.2+) to intercept audio at the system level. When a trigger app activates the mic:
