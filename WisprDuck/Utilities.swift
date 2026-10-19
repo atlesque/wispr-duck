@@ -7,6 +7,28 @@ import AppKit
 let privacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
 let microphonePrivacySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
 
+/// Resolves helpers to their outermost app. Each audio worker owns its own
+/// cache so neither Launch Services lookups nor mutable state cross into UI work.
+final class AppBundleIDResolver {
+    private var cache: [String: String] = [:]
+
+    func rootAppBundleID(for bundleID: String) -> String {
+        if let cached = cache[bundleID] { return cached }
+        var components = bundleID.split(separator: ".").map(String.init)
+        while components.count > 2 {
+            let candidate = components.joined(separator: ".")
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: candidate),
+               url.pathComponents.filter({ $0.hasSuffix(".app") }).count <= 1 {
+                cache[bundleID] = candidate
+                return candidate
+            }
+            components.removeLast()
+        }
+        cache[bundleID] = bundleID
+        return bundleID
+    }
+}
+
 /// Human-readable Core Audio status for logs and user-facing diagnostics.
 func describeOSStatus(_ status: OSStatus) -> String {
     guard status != noErr else { return "noErr" }

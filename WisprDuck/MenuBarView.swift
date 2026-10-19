@@ -54,7 +54,6 @@ struct MenuBarView: View {
                         get: { Double(settings.duckLevel) },
                         set: {
                             settings.duckLevel = Int($0)
-                            duckController.updateDuckLevel(Int($0))
                         }
                     ),
                     in: 0...100,
@@ -109,7 +108,6 @@ struct MenuBarView: View {
                 }
                 .footerButtonStyle()
                 Button("Quit") {
-                    duckController.restoreAndStop()
                     NSApplication.shared.terminate(nil)
                 }
                 .footerButtonStyle()

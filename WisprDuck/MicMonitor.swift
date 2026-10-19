@@ -21,8 +21,7 @@ final class MicMonitor: ObservableObject {
         didSet { triggerSettingsDidChange() }
     }
 
-    /// Optional resolver to map helper bundle IDs to their root app bundle ID.
-    var rootBundleIDResolver: ((String) -> String)?
+    private let appResolver = AppBundleIDResolver()
 
     private var currentDeviceID: AudioDeviceID = kAudioObjectUnknown
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
@@ -34,11 +33,13 @@ final class MicMonitor: ObservableObject {
 
     init() {
         listenerQueue.setSpecific(key: listenerQueueKey, value: ())
-        performOnListenerQueue {
-            setupDefaultDeviceListener()
-            setupProcessListListener()
-            bindToCurrentInputDevice()
-            refreshPerProcessListeners()
+        // Core Audio can stall even during listener setup. Launch must leave
+        // the main thread free to display and open the menu bar item.
+        listenerQueue.async { [self] in
+            self.setupDefaultDeviceListener()
+            self.setupProcessListListener()
+            self.bindToCurrentInputDevice()
+            self.refreshPerProcessListeners()
         }
     }
 
@@ -316,7 +317,7 @@ final class MicMonitor: ObservableObject {
     /// state on the listener queue, then dispatches to main to read configuration
     /// and publish the result.
     private func reevaluateTriggerState(micActive: Bool? = nil) {
-        // Read CoreAudio state on the current (listener) queue — these are fast, thread-safe reads
+        // Core Audio reads and app identity lookups can block; keep them here.
         let deviceActive = micActive ?? isDeviceRunningSomewhere()
 
         // Gather process-level data while still on the listener queue
@@ -343,7 +344,9 @@ final class MicMonitor: ObservableObject {
             }
         }
 
-        // Dispatch to main to safely read configuration and publish result
+        let resolvedInputBundleIDs = inputBundleIDs.map { appResolver.rootAppBundleID(for: $0) }
+
+        // Dispatch to main only to read configuration and publish the result.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isMicActive = deviceActive || !inputBundleIDs.isEmpty
@@ -351,12 +354,8 @@ final class MicMonitor: ObservableObject {
                 self.shouldTriggerDuck = deviceActive || !inputBundleIDs.isEmpty
                 return
             }
-            let resolver = self.rootBundleIDResolver
             let triggerIDs = self.triggerBundleIDs
-            self.shouldTriggerDuck = inputBundleIDs.contains { bundleID in
-                let resolved = resolver?(bundleID) ?? bundleID
-                return triggerIDs.contains(resolved)
-            }
+            self.shouldTriggerDuck = resolvedInputBundleIDs.contains { triggerIDs.contains($0) }
         }
     }
 

@@ -160,16 +160,18 @@ struct WelcomeView: View {
         isRequestingSystemAudio = true
         systemAudioMessage = nil
 
-        if let errorMessage = duckController.requestSystemAudioPermissionPrompt() {
-            systemAudioMessage = errorMessage
-            NSWorkspace.shared.open(privacySettingsURL)
-            isRequestingSystemAudio = false
-            return
-        }
+        duckController.requestSystemAudioPermissionPrompt { errorMessage in
+            if let errorMessage {
+                systemAudioMessage = errorMessage
+                NSWorkspace.shared.open(privacySettingsURL)
+                isRequestingSystemAudio = false
+                return
+            }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            isRequestingSystemAudio = false
-            systemAudioMessage = "If no prompt appeared, enable WisprDuck in System Settings."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                isRequestingSystemAudio = false
+                systemAudioMessage = "If no prompt appeared, enable WisprDuck in System Settings."
+            }
         }
     }
 }

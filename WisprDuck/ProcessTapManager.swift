@@ -22,20 +22,14 @@ struct AudioProcess: Identifiable, Hashable {
     }
 }
 
-/// A deduplicated audio app for the UI, grouped by root app bundle ID.
-struct AudioApp: Identifiable, Hashable {
-    let bundleID: String
-    let name: String
-    var id: String { bundleID }
-}
-
 /// Manages per-process audio taps for volume ducking.
 /// Enumerates audio-producing processes, creates/destroys ProcessTap instances,
 /// and monitors for new audio processes appearing while ducked.
-final class ProcessTapManager {
+/// Confined to AudioCoordinator's queue, including listeners and fade cleanup.
+final class ProcessTapManager: AudioBackend {
     private var activeTaps: [pid_t: ProcessTap] = [:]
     private var processListListenerBlock: AudioObjectPropertyListenerBlock?
-    private let listenerQueue = DispatchQueue(label: "com.wisprduck.processmonitor", qos: .userInitiated)
+    private let listenerQueue: DispatchQueue
     private var isDucking = false
     private var currentDuckLevel: Float = 1.0
     private var currentBundleIDs: Set<String> = []
@@ -47,48 +41,27 @@ final class ProcessTapManager {
     private var outputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var systemAudioPrimer: SystemAudioPermissionPrimer?
 
-    /// Cache for bundle ID → root app bundle ID resolution.
-    /// Avoids repeated NSWorkspace lookups for the same helper bundle IDs.
-    private var rootBundleIDCache: [String: String] = [:]
+    private let appResolver = AppBundleIDResolver()
 
-    // MARK: - Root App Resolution
-
-    /// Resolves a helper/subprocess bundle ID to its parent app's bundle ID.
-    /// e.g., "com.google.Chrome.helper.Renderer" → "com.google.Chrome"
-    ///
-    /// Walks up the bundle ID hierarchy (stripping trailing components) until
-    /// it finds a top-level app. Helper apps embedded inside a parent .app
-    /// (e.g., Chrome Helper.app inside Chrome.app) are skipped — only the
-    /// outermost app counts.
-    func rootAppBundleID(for bundleID: String) -> String {
-        if let cached = rootBundleIDCache[bundleID] {
-            return cached
-        }
-
-        var components = bundleID.split(separator: ".").map(String.init)
-
-        // Try progressively shorter prefixes until we find a top-level app
-        while components.count > 2 {
-            let candidate = components.joined(separator: ".")
-            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: candidate),
-               isTopLevelApp(url) {
-                rootBundleIDCache[bundleID] = candidate
-                return candidate
-            }
-            components.removeLast()
-        }
-
-        // No parent app found — use original
-        rootBundleIDCache[bundleID] = bundleID
-        return bundleID
+    init(queue: DispatchQueue) {
+        listenerQueue = queue
     }
 
-    /// Check if an app URL is a top-level app (not nested inside another .app bundle).
-    /// e.g., "/Applications/Chrome.app" → true
-    ///       "/Applications/Chrome.app/Contents/Frameworks/Chrome Helper.app" → false
-    private func isTopLevelApp(_ url: URL) -> Bool {
-        let appExtensions = url.pathComponents.filter { $0.hasSuffix(".app") }
-        return appExtensions.count <= 1
+    func startMonitoring(
+        onAppsChanged: @escaping ([AudioApp], [AudioApp]) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
+        self.onError = onError
+        onProcessListChanged = { [weak self] processes in
+            guard let self else { return }
+            onAppsChanged(
+                self.audioApps(from: processes),
+                self.audioApps(from: processes, includeAccessory: true)
+            )
+        }
+        startProcessListMonitoring()
+        onProcessListChanged?(enumerateAudioProcesses())
     }
 
     // MARK: - Process Enumeration
@@ -150,7 +123,7 @@ final class ProcessTapManager {
 
         for process in processes {
             guard let bid = process.bundleID else { continue }
-            let rootBID = rootAppBundleID(for: bid)
+            let rootBID = appResolver.rootAppBundleID(for: bid)
             guard !seen.contains(rootBID) else { continue }
             seen.insert(rootBID)
 
@@ -177,7 +150,7 @@ final class ProcessTapManager {
     /// resolving helpers to their parent app.
     private func processMatchesSelection(_ process: AudioProcess, selectedBundleIDs: Set<String>) -> Bool {
         guard let bid = process.bundleID else { return false }
-        let rootBID = rootAppBundleID(for: bid)
+        let rootBID = appResolver.rootAppBundleID(for: bid)
         return selectedBundleIDs.contains(rootBID)
     }
 
@@ -188,6 +161,7 @@ final class ProcessTapManager {
     /// If called during a fade-out, cancels the fade and reuses existing taps.
     @discardableResult
     func duck(bundleIDs: Set<String>, duckAll: Bool, duckLevel: Float) -> Bool {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
         // Cancel any pending fade-out destruction
         fadeOutTimer?.cancel()
         fadeOutTimer = nil
@@ -203,27 +177,6 @@ final class ProcessTapManager {
         currentBundleIDs = bundleIDs
         duckAllMode = duckAll
         startOutputDeviceMonitoring()
-
-        return reconcileActiveTaps(
-            bundleIDs: bundleIDs,
-            duckAll: duckAll,
-            duckLevel: duckLevel,
-            outputDeviceUID: outputUID
-        )
-    }
-
-    /// Reconcile active taps with the current settings while ducking is already active.
-    @discardableResult
-    func reconcileActiveTaps(bundleIDs: Set<String>, duckAll: Bool, duckLevel: Float) -> Bool {
-        guard let outputUID = getDefaultOutputDeviceUID() else {
-            reportError("WisprDuck could not read the current output device. Check macOS audio output and permissions.")
-            return false
-        }
-
-        isDucking = true
-        currentBundleIDs = bundleIDs
-        currentDuckLevel = duckLevel
-        duckAllMode = duckAll
 
         return reconcileActiveTaps(
             bundleIDs: bundleIDs,
@@ -287,6 +240,7 @@ final class ProcessTapManager {
     /// Restore all ducked processes immediately. Used for app quit where
     /// we can't wait for a fade.
     func restoreAll() {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
         isDucking = false
         fadeOutTimer?.cancel()
         fadeOutTimer = nil
@@ -303,7 +257,9 @@ final class ProcessTapManager {
     /// Taps stay in activeTaps during the fade so duck() can cancel and reuse them.
     /// Timer fires just before the ramp completes so the tap destruction pop lands at 100%.
     func restoreAllWithFade() {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
         isDucking = false
+        fadeOutTimer?.cancel()
         fadeOutGeneration += 1
         let generation = fadeOutGeneration
 
@@ -339,15 +295,7 @@ final class ProcessTapManager {
             self.stopOutputDeviceMonitoring()
         }
         fadeOutTimer = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + estimatedFadeTime, execute: workItem)
-    }
-
-    /// Update duck level for all active taps.
-    func updateDuckLevel(_ level: Float) {
-        currentDuckLevel = level
-        for tap in activeTaps.values {
-            tap.updateDuckLevel(level)
-        }
+        listenerQueue.asyncAfter(deadline: .now() + estimatedFadeTime, execute: workItem)
     }
 
     // MARK: - Process List Monitoring
@@ -365,12 +313,10 @@ final class ProcessTapManager {
 
         processListListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            // Enumerate on the listener queue (CoreAudio + NSRunningApplication lookups)
-            // to avoid blocking the main thread during process list churn.
+            // Enumeration and tap lifecycle share the audio queue. Only the
+            // resulting app snapshots are forwarded to the UI.
             let processes = self.enumerateAudioProcesses()
-            DispatchQueue.main.async {
-                self.handleProcessListChanged(with: processes)
-            }
+            self.handleProcessListChanged(with: processes)
         }
 
         let status = AudioObjectAddPropertyListenerBlock(
@@ -418,9 +364,7 @@ final class ProcessTapManager {
         )
 
         outputDeviceListenerBlock = { [weak self] _, _ in
-            DispatchQueue.main.async {
-                self?.handleOutputDeviceChanged()
-            }
+            self?.handleOutputDeviceChanged()
         }
 
         let status = AudioObjectAddPropertyListenerBlock(
@@ -507,20 +451,10 @@ final class ProcessTapManager {
         }
     }
 
-    /// Set a callback for when the process list changes (for UI updates).
-    /// The callback receives the already-enumerated process list to avoid re-enumeration.
-    func setProcessListChangedHandler(_ handler: @escaping ([AudioProcess]) -> Void) {
-        onProcessListChanged = handler
-    }
-
-    /// Set a callback for recoverable Core Audio failures that should be visible in the UI.
-    func setErrorHandler(_ handler: @escaping (String) -> Void) {
-        onError = handler
-    }
-
     /// Attempts to trigger macOS' System Audio Recording prompt during onboarding.
     /// macOS shows this prompt when recording starts from an aggregate device that contains a tap.
     func requestSystemAudioPermissionPrompt() -> String? {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
         guard systemAudioPrimer == nil else { return nil }
         guard let outputUID = getDefaultOutputDeviceUID() else {
             return "WisprDuck could not read the current output device. Open System Audio settings and allow WisprDuck."
@@ -532,7 +466,7 @@ final class ProcessTapManager {
         }
 
         systemAudioPrimer = primer
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        listenerQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.systemAudioPrimer?.stop()
             self?.systemAudioPrimer = nil
         }
@@ -578,16 +512,20 @@ final class ProcessTapManager {
 
     private func reportError(_ message: String) {
         logger.error("\(message)")
-        DispatchQueue.main.async { [weak self] in
-            self?.onError?(message)
-        }
+        onError?(message)
     }
 
-    deinit {
+    func shutdown() {
+        dispatchPrecondition(condition: .onQueue(listenerQueue))
         stopProcessListMonitoring()
         stopOutputDeviceMonitoring()
         systemAudioPrimer?.stop()
+        systemAudioPrimer = nil
         restoreAll()
+    }
+
+    deinit {
+        shutdown()
     }
 }
 
